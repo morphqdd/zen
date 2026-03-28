@@ -38,16 +38,17 @@ func main() {
 	config.Name = "zen-tun"
 
 	iface, err := water.New(config)
-
-	log.Println("Interface allocated:", iface.Name())
-	// set interface parameters
-	utils.RunIP("link", "set", "dev", iface.Name(), "mtu", MTU)
-	utils.RunIP("link", "set", "dev", iface.Name(), "up")
-	utils.RunIP("route", "add", LOCAL_IP, "dev", iface.Name())
 	if err != nil {
 		log.Fatalln(err)
 	}
 
+	log.Println("Interface allocated:", iface.Name())
+	// set interface parameters
+	utils.RunIP("link", "set", "dev", iface.Name(), "mtu", MTU)
+	utils.RunIP("addr", "add", "10.0.0.1/24", "dev", iface.Name())
+	utils.RunIP("link", "set", "dev", iface.Name(), "up")
+	utils.RunIP("route", "add", LOCAL_IP, "dev", iface.Name())
+	utils.RunIP("route", "add", "128.0.0.0", "dev", iface.Name())
 	lstnAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%v", *port))
 	if err != nil {
 		log.Fatalln("Unable to get socket:", err)
@@ -75,7 +76,7 @@ func main() {
 		}
 	}()
 
-	if *remoteIP == "" {
+	if *remoteIP != "" {
 		remoteAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%v", *remoteIP, *port))
 		if err != nil {
 			log.Fatalln("Unable to get socket:", err)
@@ -98,7 +99,7 @@ func main() {
 				log.Println("Dst: ", ip.DstIP)
 				log.Println("LayerType: ", ip.LayerType())
 
-				packet := gopacket.NewPacket(ip.LayerContents(), layers.LayerTypeTCP, gopacket.Default)
+				packet := gopacket.NewPacket(ip.LayerContents(), layers.LayerTypeUDP, gopacket.Default)
 
 				udpLayer := packet.Layer(layers.LayerTypeUDP)
 				if udpLayer != nil {
