@@ -30,10 +30,10 @@ func main() {
 		DeviceType: water.TUN,
 	}
 
-	if "" == *remoteIP {
-		flag.Usage()
-		log.Fatalln("\nremote server is not specified")
-	}
+	// if "" == *remoteIP {
+	// 	flag.Usage()
+	// 	log.Fatalln("\nremote server is not specified")
+	// }
 
 	config.Name = "zen-tun"
 
@@ -48,10 +48,6 @@ func main() {
 		log.Fatalln(err)
 	}
 
-	remoteAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%v", *remoteIP, *port))
-	if err != nil {
-		log.Fatalln("Unable to get socket:", err)
-	}
 	lstnAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%v", *port))
 	if err != nil {
 		log.Fatalln("Unable to get socket:", err)
@@ -79,33 +75,39 @@ func main() {
 		}
 	}()
 
-	packet := make([]byte, BUFFER_SIZE)
-
-	for {
-		n, err := iface.Read(packet)
+	if *remoteIP == "" {
+		remoteAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%v", *remoteIP, *port))
 		if err != nil {
-			log.Fatalln(err)
+			log.Fatalln("Unable to get socket:", err)
 		}
+		packet := make([]byte, BUFFER_SIZE)
 
-		lstnConn.WriteToUDP(packet[:n], remoteAddr)
-		packet := gopacket.NewPacket(packet, layers.LayerTypeIPv4, gopacket.Default)
+		for {
+			n, err := iface.Read(packet)
+			if err != nil {
+				log.Fatalln(err)
+			}
 
-		ipLayer := packet.Layer(layers.LayerTypeIPv4)
-		if ipLayer != nil {
-			ip, _ := ipLayer.(*layers.IPv4)
-			log.Println("Src: ", ip.SrcIP)
-			log.Println("Dst: ", ip.DstIP)
-			log.Println("LayerType: ", ip.LayerType())
+			lstnConn.WriteToUDP(packet[:n], remoteAddr)
+			packet := gopacket.NewPacket(packet, layers.LayerTypeIPv4, gopacket.Default)
 
-			packet := gopacket.NewPacket(ip.LayerContents(), layers.LayerTypeTCP, gopacket.Default)
+			ipLayer := packet.Layer(layers.LayerTypeIPv4)
+			if ipLayer != nil {
+				ip, _ := ipLayer.(*layers.IPv4)
+				log.Println("Src: ", ip.SrcIP)
+				log.Println("Dst: ", ip.DstIP)
+				log.Println("LayerType: ", ip.LayerType())
 
-			udpLayer := packet.Layer(layers.LayerTypeUDP)
-			if udpLayer != nil {
-				udp, _ := udpLayer.(*layers.UDP)
-				log.Println("Src port: ", udp.SrcPort)
-				log.Println("Dst port: ", udp.DstPort)
-				log.Println("LayerType: ", udp.LayerType())
-				log.Printf("Content: %s\n", udp.LayerContents())
+				packet := gopacket.NewPacket(ip.LayerContents(), layers.LayerTypeTCP, gopacket.Default)
+
+				udpLayer := packet.Layer(layers.LayerTypeUDP)
+				if udpLayer != nil {
+					udp, _ := udpLayer.(*layers.UDP)
+					log.Println("Src port: ", udp.SrcPort)
+					log.Println("Dst port: ", udp.DstPort)
+					log.Println("LayerType: ", udp.LayerType())
+					log.Printf("Content: %s\n", udp.LayerContents())
+				}
 			}
 		}
 	}
