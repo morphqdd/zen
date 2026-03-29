@@ -181,6 +181,10 @@ func MakeQueryName(sessionID string, sequence int, encodedData, baseDomain strin
 
 // ParseQueryName парсит DNS query name и извлекает session ID, sequence и данные
 func ParseQueryName(queryName, baseDomain string) (sessionID string, sequence int, data []byte, err error) {
+	// Убираем trailing dot если есть
+	queryName = strings.TrimSuffix(queryName, ".")
+	baseDomain = strings.TrimSuffix(baseDomain, ".")
+
 	// Удаляем base domain
 	prefix := strings.TrimSuffix(queryName, "."+baseDomain)
 	if prefix == queryName {
