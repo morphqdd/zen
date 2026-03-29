@@ -1,0 +1,32 @@
+# Binaries
+zen-client
+zen-server
+zenctl
+
+# Build artifacts
+*.o
+*.a
+*.so
+
+# Test files
+*.test
+coverage.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Configuration (sensitive)
+*.conf
+/etc/zen/
+
+# Temporary
+tmp/
+temp/

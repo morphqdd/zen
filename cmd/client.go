@@ -1,115 +1,254 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
-	"net"
+	"time"
+
+	"zen/internal/config"
+	"zen/internal/crypto"
+	"zen/internal/doh"
+	"zen/internal/encoding"
 	"zen/internal/utils"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 	"github.com/songgao/water"
 	"golang.org/x/net/ipv4"
 )
 
 var (
-	remoteIP = flag.String("remote", "", "Remote server (external) IP like 8.8.8.8")
-	port     = flag.Int("port", 4321, "TCP port for communication")
+	configFile = flag.String("config", "", "Path to client config file (recommended)")
+	dohServer  = flag.String("doh", "https://dns.yandex.ru/dns-query", "DoH server URL")
+	domain     = flag.String("domain", "vpn.example.com", "Base domain for VPN")
+	key        = flag.String("key", "", "Hex-encoded encryption key (64 chars)")
+	secret     = flag.String("secret", "", "Hex-encoded HMAC secret (32+ chars)")
+	style      = flag.String("style", "mixed", "Subdomain style: api, cdn, storage, mixed")
 )
 
 const (
 	BUFFER_SIZE = 1500
 	MTU         = "1300"
-	LOCAL_IP    = "0.0.0.0/1"
+	LOCAL_IP    = "10.0.0.1/24"
 )
 
 func main() {
 	flag.Parse()
+
+	var cryptoKey, hmacSecret []byte
+	var err error
+
+	// Загружаем конфигурацию
+	if *configFile != "" {
+		// Загружаем из конфиг файла
+		cfg, err := config.LoadClientConfig(*configFile)
+		if err != nil {
+			log.Fatalf("Failed to load config: %v", err)
+		}
+
+		*domain = cfg.Domain
+		*dohServer = cfg.DoHServer
+		*style = cfg.SubdomainStyle
+
+		cryptoKey, err = hex.DecodeString(cfg.EncryptionKey)
+		if err != nil {
+			log.Fatalf("Invalid encryption key in config: %v", err)
+		}
+
+		hmacSecret, err = hex.DecodeString(cfg.HMACSecret)
+		if err != nil {
+			log.Fatalf("Invalid HMAC secret in config: %v", err)
+		}
+
+		log.Printf("Loaded configuration from: %s", *configFile)
+		log.Printf("Domain: %s", *domain)
+		log.Printf("DoH Server: %s", *dohServer)
+	} else {
+		// Используем флаги командной строки
+		if *key == "" || *secret == "" {
+			log.Fatalln("Encryption key and HMAC secret are required (use --config or --key/--secret)")
+		}
+
+		cryptoKey, err = hex.DecodeString(*key)
+		if err != nil {
+			log.Fatalf("Invalid key format: %v", err)
+		}
+
+		hmacSecret, err = hex.DecodeString(*secret)
+		if err != nil {
+			log.Fatalf("Invalid secret format: %v", err)
+		}
+	}
+
+	// Инициализируем crypto и validator
+	cipher, err := crypto.NewCipher(cryptoKey)
+	if err != nil {
+		log.Fatalf("Failed to create cipher: %v", err)
+	}
+
+	validator := encoding.NewValidator(hmacSecret, 8)
+
+	// Создаём DoH клиент
+	dohClient := doh.NewClient(*dohServer, 10*time.Second)
+
+	// Генерируем session ID
+	sessionID := generateSessionID()
+	log.Printf("Session ID: %s", sessionID)
+
+	// Создаём TUN интерфейс
 	config := water.Config{
 		DeviceType: water.TUN,
 	}
-
-	// if "" == *remoteIP {
-	// 	flag.Usage()
-	// 	log.Fatalln("\nremote server is not specified")
-	// }
-
 	config.Name = "zen-tun"
 
 	iface, err := water.New(config)
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalln("Failed to create TUN interface:", err)
 	}
 
-	log.Println("Interface allocated:", iface.Name())
-	// set interface parameters
+	log.Printf("TUN interface created: %s", iface.Name())
+
+	// Настраиваем интерфейс
 	utils.RunIP("link", "set", "dev", iface.Name(), "mtu", MTU)
-	utils.RunIP("addr", "add", "10.0.0.1/24", "dev", iface.Name())
+	utils.RunIP("addr", "add", LOCAL_IP, "dev", iface.Name())
 	utils.RunIP("link", "set", "dev", iface.Name(), "up")
-	utils.RunIP("route", "add", LOCAL_IP, "dev", iface.Name())
-	utils.RunIP("route", "add", "128.0.0.0", "dev", iface.Name())
-	lstnAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%v", *port))
-	if err != nil {
-		log.Fatalln("Unable to get socket:", err)
-	}
+	utils.RunIP("route", "add", "0.0.0.0/1", "dev", iface.Name())
+	utils.RunIP("route", "add", "128.0.0.0/1", "dev", iface.Name())
 
-	lstnConn, err := net.ListenUDP("udp", lstnAddr)
-	if err != nil {
-		log.Fatalln("Unable to listen socket:", err)
-	}
-	defer lstnConn.Close()
+	// Запускаем downstream polling (получение пакетов от сервера)
+	go pollDownstream(dohClient, *domain, sessionID, cipher, iface)
 
-	go func() {
-		buf := make([]byte, BUFFER_SIZE)
-		for {
-			n, addr, err := lstnConn.ReadFromUDP(buf)
-			header, _ := ipv4.ParseHeader(buf[:n])
-			fmt.Printf("Received %d bytes from %v: %+v\n", n, addr, header)
+	// Основной цикл: читаем пакеты из TUN и отправляем через DoH
+	sequence := 0
+	packet := make([]byte, BUFFER_SIZE)
 
-			if err != nil || n == 0 {
-				fmt.Println(err)
-				continue
-			}
-
-			iface.Write(buf[:n])
-		}
-	}()
-
-	if *remoteIP != "" {
-		remoteAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%v", *remoteIP, *port))
+	for {
+		n, err := iface.Read(packet)
 		if err != nil {
-			log.Fatalln("Unable to get socket:", err)
+			log.Printf("TUN read error: %v", err)
+			continue
 		}
-		packet := make([]byte, BUFFER_SIZE)
 
-		for {
-			n, err := iface.Read(packet)
-			if err != nil {
-				log.Fatalln(err)
-			}
-
-			lstnConn.WriteToUDP(packet[:n], remoteAddr)
-			packet := gopacket.NewPacket(packet, layers.LayerTypeIPv4, gopacket.Default)
-
-			ipLayer := packet.Layer(layers.LayerTypeIPv4)
-			if ipLayer != nil {
-				ip, _ := ipLayer.(*layers.IPv4)
-				log.Println("Src: ", ip.SrcIP)
-				log.Println("Dst: ", ip.DstIP)
-				log.Println("LayerType: ", ip.LayerType())
-
-				packet := gopacket.NewPacket(ip.LayerContents(), layers.LayerTypeUDP, gopacket.Default)
-
-				udpLayer := packet.Layer(layers.LayerTypeUDP)
-				if udpLayer != nil {
-					udp, _ := udpLayer.(*layers.UDP)
-					log.Println("Src port: ", udp.SrcPort)
-					log.Println("Dst port: ", udp.DstPort)
-					log.Println("LayerType: ", udp.LayerType())
-					log.Printf("Content: %s\n", udp.LayerContents())
-				}
-			}
+		if n == 0 {
+			continue
 		}
+
+		// Парсим IP заголовок для логирования
+		if header, err := ipv4.ParseHeader(packet[:n]); err == nil {
+			log.Printf("Upstream packet: %s -> %s, size=%d", header.Src, header.Dst, n)
+		}
+
+		// Шифруем пакет
+		encrypted, err := cipher.Encrypt(packet[:n])
+		if err != nil {
+			log.Printf("Encryption failed: %v", err)
+			continue
+		}
+
+		// Подписываем HMAC
+		signed := validator.SignData(encrypted)
+
+		// Кодируем в subdomain
+		encodedData, err := encoding.EncodeToSubdomain(signed, *style)
+		if err != nil {
+			log.Printf("Encoding failed: %v", err)
+			continue
+		}
+
+		// Создаём DNS query name
+		queryName := encoding.MakeQueryName(sessionID, sequence, encodedData, *domain)
+		log.Printf("Sending DNS query: %s", queryName)
+
+		// Отправляем через DoH
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		resp, err := dohClient.QueryA(ctx, queryName)
+		cancel()
+
+		if err != nil {
+			log.Printf("DoH query failed: %v", err)
+			continue
+		}
+
+		log.Printf("DoH response: %d answers", len(resp.Answer))
+		sequence++
 	}
+}
+
+// pollDownstream опрашивает сервер для получения downstream пакетов
+func pollDownstream(client *doh.Client, domain, sessionID string, cipher *crypto.Cipher, iface *water.Interface) {
+	pollID := 0
+	emptyCount := 0
+
+	for {
+		// Формируем TXT query для polling
+		queryName := fmt.Sprintf("resp-%s-%d.%s", sessionID, pollID, domain)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		resp, err := client.QueryTXT(ctx, queryName)
+		cancel()
+
+		if err != nil {
+			log.Printf("Downstream poll error: %v", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		// Извлекаем TXT данные
+		txtRecords, err := doh.ExtractTXTData(resp)
+		if err != nil || len(txtRecords) == 0 || txtRecords[0] == "" {
+			// Нет данных, увеличиваем интервал polling
+			emptyCount++
+			if emptyCount > 5 {
+				time.Sleep(500 * time.Millisecond)
+			} else {
+				time.Sleep(100 * time.Millisecond)
+			}
+			pollID++
+			continue
+		}
+
+		emptyCount = 0
+
+		// Декодируем hex данные
+		hexData := ""
+		for _, txt := range txtRecords {
+			hexData += txt
+		}
+
+		encrypted, err := hex.DecodeString(hexData)
+		if err != nil {
+			log.Printf("Failed to decode TXT data: %v", err)
+			pollID++
+			continue
+		}
+
+		// Расшифровываем
+		packet, err := cipher.Decrypt(encrypted)
+		if err != nil {
+			log.Printf("Failed to decrypt downstream packet: %v", err)
+			pollID++
+			continue
+		}
+
+		// Парсим IP заголовок
+		if header, err := ipv4.ParseHeader(packet); err == nil {
+			log.Printf("Downstream packet: %s -> %s, size=%d", header.Src, header.Dst, len(packet))
+		}
+
+		// Записываем в TUN
+		if _, err := iface.Write(packet); err != nil {
+			log.Printf("Failed to write to TUN: %v", err)
+		}
+
+		pollID++
+	}
+}
+
+// generateSessionID генерирует случайный session ID
+func generateSessionID() string {
+	b := make([]byte, 6)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
