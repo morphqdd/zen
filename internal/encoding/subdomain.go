@@ -116,6 +116,10 @@ func EncodeToSubdomain(data []byte, style string) (string, error) {
 	}
 	if len(hexData) > maxHexLen {
 		hexData = hexData[:maxHexLen]
+		// Ensure even length for hex decoding
+		if len(hexData)%2 != 0 {
+			hexData = hexData[:len(hexData)-1]
+		}
 	}
 
 	// Собираем: service-resource-action-hexdata
