@@ -7,7 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"zen/internal/config"
@@ -111,6 +114,9 @@ func main() {
 
 	log.Printf("TUN interface created: %s", iface.Name())
 
+	// Список маршрутов для очистки при выходе
+	var routesToCleanup []string
+
 	// Настраиваем интерфейс
 	utils.RunIP("link", "set", "dev", iface.Name(), "mtu", MTU)
 	utils.RunIP("addr", "add", LOCAL_IP, "dev", iface.Name())
@@ -120,16 +126,41 @@ func main() {
 	// Cloudflare DNS: 104.16.0.0/13 covers cloudflare-dns.com IPs
 	// Google DNS: 8.8.8.0/24, 8.8.4.0/24
 	log.Printf("Adding route exceptions for DoH servers...")
-	addRouteException("104.16.0.0/13")  // Cloudflare
-	addRouteException("1.1.1.0/24")     // Cloudflare DNS
-	addRouteException("1.0.0.0/24")     // Cloudflare DNS
-	addRouteException("8.8.8.0/24")     // Google DNS
-	addRouteException("8.8.4.0/24")     // Google DNS
-	addRouteException("77.88.8.0/24")   // Yandex DNS
+	dohRoutes := []string{
+		"104.16.0.0/13", // Cloudflare
+		"1.1.1.0/24",    // Cloudflare DNS
+		"1.0.0.0/24",    // Cloudflare DNS
+		"8.8.8.0/24",    // Google DNS
+		"8.8.4.0/24",    // Google DNS
+		"77.88.8.0/24",  // Yandex DNS
+	}
+	for _, route := range dohRoutes {
+		if addRouteException(route) {
+			routesToCleanup = append(routesToCleanup, route)
+		}
+	}
 
 	// Теперь настраиваем VPN маршруты (они перехватывают весь остальной трафик)
-	utils.RunIP("route", "add", "0.0.0.0/1", "dev", iface.Name())
-	utils.RunIP("route", "add", "128.0.0.0/1", "dev", iface.Name())
+	vpnRoutes := []string{"0.0.0.0/1", "128.0.0.0/1"}
+	for _, route := range vpnRoutes {
+		if !routeExists(route) {
+			utils.RunIP("route", "add", route, "dev", iface.Name())
+			routesToCleanup = append(routesToCleanup, route)
+			log.Printf("Added VPN route: %s", route)
+		} else {
+			log.Printf("VPN route already exists: %s, skipping", route)
+		}
+	}
+
+	// Настраиваем обработчик сигналов для очистки при выходе
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		log.Printf("\nReceived interrupt signal, cleaning up...")
+		cleanup(iface.Name(), routesToCleanup)
+		os.Exit(0)
+	}()
 
 	// Запускаем downstream polling (получение пакетов от сервера)
 	go pollDownstream(dohClient, *domain, sessionID, cipher, iface)
@@ -289,17 +320,51 @@ func generateSessionID() string {
 
 // addRouteException добавляет исключение в маршрутизации для DoH сервера
 // чтобы DoH трафик не уходил через VPN туннель
-func addRouteException(network string) {
+// Возвращает true если маршрут был добавлен, false если он уже существует или произошла ошибка
+func addRouteException(network string) bool {
+	// Проверяем существует ли маршрут
+	if routeExists(network) {
+		log.Printf("Route already exists: %s, skipping", network)
+		return false
+	}
+
 	// Получаем default gateway и interface
 	gateway, iface := getDefaultRoute()
 	if gateway == "" || iface == "" {
 		log.Printf("Warning: Could not detect default route, skipping exception for %s", network)
-		return
+		return false
 	}
 
 	// Добавляем route exception
 	utils.RunIP("route", "add", network, "via", gateway, "dev", iface)
 	log.Printf("Added route exception: %s via %s dev %s", network, gateway, iface)
+	return true
+}
+
+// routeExists проверяет существует ли маршрут
+func routeExists(network string) bool {
+	output := utils.RunCommandOutput("ip", "route", "show", network)
+	return strings.TrimSpace(output) != ""
+}
+
+// cleanup удаляет маршруты и TUN интерфейс
+func cleanup(tunName string, routes []string) {
+	log.Printf("Cleaning up routes...")
+
+	// Удаляем VPN маршруты
+	for _, route := range routes {
+		// Проверяем что маршрут существует перед удалением
+		if routeExists(route) {
+			utils.RunCommand("ip", "route", "del", route)
+			log.Printf("Removed route: %s", route)
+		}
+	}
+
+	// Удаляем TUN интерфейс
+	utils.RunCommand("ip", "link", "del", tunName)
+	log.Printf("Removed TUN interface: %s", tunName)
+
+	log.Printf("Cleanup completed")
 }
 
 // getDefaultRoute возвращает default gateway и interface
