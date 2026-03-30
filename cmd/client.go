@@ -127,12 +127,15 @@ func main() {
 	// Google DNS: 8.8.8.0/24, 8.8.4.0/24
 	log.Printf("Adding route exceptions for DoH servers...")
 	dohRoutes := []string{
-		"104.16.0.0/13", // Cloudflare
-		"1.1.1.0/24",    // Cloudflare DNS
-		"1.0.0.0/24",    // Cloudflare DNS
-		"8.8.8.0/24",    // Google DNS
-		"8.8.4.0/24",    // Google DNS
-		"77.88.8.0/24",  // Yandex DNS
+		"104.16.0.0/13",  // Cloudflare CDN
+		"1.1.1.0/24",     // Cloudflare DNS
+		"1.0.0.0/24",     // Cloudflare DNS
+		"8.8.8.0/24",     // Google DNS
+		"8.8.4.0/24",     // Google DNS
+		"77.88.0.0/16",   // Yandex (wider range for dns.yandex.ru)
+		"213.180.193.0/24", // Yandex DNS
+		"213.180.204.0/24", // Yandex DNS
+		"93.158.134.0/24",  // Yandex DNS
 	}
 	for _, route := range dohRoutes {
 		if addRouteException(route) {
