@@ -108,18 +108,14 @@ func EncodeToSubdomain(data []byte, style string) (string, error) {
 		}
 	}
 
-	// Ограничиваем hex часть чтобы не превысить DNS limit в 63 символа
+	// Проверяем что hex часть не превышает DNS limit в 63 символа
 	// Оставляем место для semantic parts (~30 chars) + дефисы (~4 chars)
 	maxHexLen := 63 - len(strings.Join(parts, "-")) - 1
 	if maxHexLen < 8 {
 		maxHexLen = 8 // минимум 8 hex символов (4 байта)
 	}
 	if len(hexData) > maxHexLen {
-		hexData = hexData[:maxHexLen]
-		// Ensure even length for hex decoding
-		if len(hexData)%2 != 0 {
-			hexData = hexData[:len(hexData)-1]
-		}
+		return "", fmt.Errorf("data too large for single DNS label: %d hex chars, max %d (use ChunkData)", len(hexData), maxHexLen)
 	}
 
 	// Собираем: service-resource-action-hexdata
@@ -158,11 +154,21 @@ func DecodeFromSubdomain(subdomain string) ([]byte, error) {
 	return data, nil
 }
 
+// MaxChunkSize вычисляет максимальный размер данных для одного DNS запроса
+// Учитывает DNS label limit (63 chars) и overhead от semantic parts
+func MaxChunkSize() int {
+	// DNS label max: 63 символа
+	// Semantic parts: ~20 chars (например "cdn-images-thumb-")
+	// Дефисы: 3 chars
+	// Доступно для hex: ~40 chars = 20 bytes сырых данных
+	return 20
+}
+
 // ChunkData разбивает большие данные на chunks для отправки в нескольких DNS запросах
-// Каждый chunk должен помещаться в один subdomain (max ~200 bytes raw data)
+// Каждый chunk должен помещаться в один subdomain
 func ChunkData(data []byte, maxChunkSize int) [][]byte {
 	if maxChunkSize <= 0 {
-		maxChunkSize = 200 // default: ~200 bytes → ~400 hex chars → ~50 chars per chunk with dashes
+		maxChunkSize = MaxChunkSize()
 	}
 
 	var chunks [][]byte

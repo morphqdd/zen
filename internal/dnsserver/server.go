@@ -111,43 +111,58 @@ func (s *Server) handleDNSRequest(w dns.ResponseWriter, req *dns.Msg) {
 // Формат: <session-id>-<seq>.<encoded-data>.<domain>
 func (s *Server) handleUpstream(msg *dns.Msg, qname string) {
 	// Парсим query name
-	sessionID, sequence, encryptedData, err := encoding.ParseQueryName(qname, s.domain)
+	sessionID, sequence, chunkData, err := encoding.ParseQueryName(qname, s.domain)
 	if err != nil {
 		log.Printf("Failed to parse query name: %v", err)
 		s.returnFakeIP(msg, qname)
 		return
 	}
 
-	// Проверяем HMAC и извлекаем данные
-	signedData, err := s.validator.VerifyData(encryptedData, 0) // 0 = отключить timestamp проверку для отладки
-	if err != nil {
-		log.Printf("HMAC validation failed for session %s: %v", sessionID, err)
+	// Извлекаем заголовок chunk: 2 bytes (total_chunks, chunk_index)
+	if len(chunkData) < 2 {
+		log.Printf("Chunk data too short for session %s", sessionID)
 		s.returnFakeIP(msg, qname)
 		return
 	}
 
-	// Расшифровываем данные
-	packetData, err := s.cipher.Decrypt(signedData)
-	if err != nil {
-		log.Printf("Decryption failed for session %s: %v", sessionID, err)
-		s.returnFakeIP(msg, qname)
-		return
-	}
+	totalChunks := int(chunkData[0])
+	chunkIndex := int(chunkData[1])
+	actualData := chunkData[2:]
 
-	log.Printf("Valid VPN packet: session=%s seq=%d size=%d", sessionID, sequence, len(packetData))
+	log.Printf("Received chunk %d/%d for session %s (seq=%d, size=%d)",
+		chunkIndex+1, totalChunks, sessionID, sequence, len(actualData))
 
 	// Получаем или создаём сессию
 	sess := s.sessions.GetOrCreate(sessionID, msg.Question[0].Name)
-	sess.AddUpstreamChunk(sequence, packetData)
+	sess.AddUpstreamChunk(chunkIndex, actualData)
 
-	// Пытаемся собрать полный пакет (для упрощения считаем что это один chunk)
-	// В реальности нужно передавать информацию о количестве chunks
-	if packet, ok := sess.TryAssembleUpstream(1); ok {
+	// Пытаемся собрать полный пакет
+	if signedData, ok := sess.TryAssembleUpstream(totalChunks); ok {
+		log.Printf("All chunks received, verifying HMAC...")
+
+		// Проверяем HMAC собранных данных
+		encryptedData, err := s.validator.VerifyData(signedData, 0)
+		if err != nil {
+			log.Printf("HMAC validation failed for session %s: %v", sessionID, err)
+			s.returnFakeIP(msg, qname)
+			return
+		}
+
+		// Расшифровываем данные
+		packetData, err := s.cipher.Decrypt(encryptedData)
+		if err != nil {
+			log.Printf("Decryption failed for session %s: %v", sessionID, err)
+			s.returnFakeIP(msg, qname)
+			return
+		}
+
+		log.Printf("Valid VPN packet: session=%s size=%d", sessionID, len(packetData))
+
 		// Отправляем пакет в очередь для TUN интерфейса
 		if s.packetQueue != nil {
 			select {
-			case s.packetQueue <- packet:
-				log.Printf("Packet queued for internet: %d bytes", len(packet))
+			case s.packetQueue <- packetData:
+				log.Printf("Packet queued for internet: %d bytes", len(packetData))
 			default:
 				log.Printf("Packet queue full, dropping packet")
 			}

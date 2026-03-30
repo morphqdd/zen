@@ -150,29 +150,49 @@ func main() {
 		// Подписываем HMAC
 		signed := validator.SignData(encrypted)
 
-		// Кодируем в subdomain
-		encodedData, err := encoding.EncodeToSubdomain(signed, *style)
-		if err != nil {
-			log.Printf("Encoding failed: %v", err)
-			continue
+		// Разбиваем на chunks
+		maxChunkSize := encoding.MaxChunkSize()
+		chunks := encoding.ChunkData(signed, maxChunkSize)
+		totalChunks := len(chunks)
+
+		log.Printf("Packet split into %d chunks", totalChunks)
+
+		// Отправляем все chunks с одним session ID
+		chunksSuccessful := 0
+		for chunkIdx, chunk := range chunks {
+			// Добавляем заголовок: 1 byte = total chunks, 1 byte = chunk index
+			header := []byte{byte(totalChunks), byte(chunkIdx)}
+			chunkWithHeader := append(header, chunk...)
+
+			// Кодируем chunk в subdomain
+			encodedData, err := encoding.EncodeToSubdomain(chunkWithHeader, *style)
+			if err != nil {
+				log.Printf("Encoding chunk %d failed: %v", chunkIdx, err)
+				break
+			}
+
+			// Создаём DNS query name
+			queryName := encoding.MakeQueryName(sessionID, sequence, encodedData, *domain)
+
+			// Отправляем через DoH
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			resp, err := dohClient.QueryA(ctx, queryName)
+			cancel()
+
+			if err != nil {
+				log.Printf("DoH query for chunk %d failed: %v", chunkIdx, err)
+				break
+			}
+
+			chunksSuccessful++
+			sequence++
 		}
 
-		// Создаём DNS query name
-		queryName := encoding.MakeQueryName(sessionID, sequence, encodedData, *domain)
-		log.Printf("Sending DNS query: %s", queryName)
-
-		// Отправляем через DoH
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		resp, err := dohClient.QueryA(ctx, queryName)
-		cancel()
-
-		if err != nil {
-			log.Printf("DoH query failed: %v", err)
-			continue
+		if chunksSuccessful == totalChunks {
+			log.Printf("Successfully sent all %d chunks", totalChunks)
+		} else {
+			log.Printf("Failed to send complete packet: %d/%d chunks sent", chunksSuccessful, totalChunks)
 		}
-
-		log.Printf("DoH response: %d answers", len(resp.Answer))
-		sequence++
 	}
 }
 
