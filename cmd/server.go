@@ -175,7 +175,10 @@ func main() {
 		allSessions := sessions.GetAllSessions()
 		if len(allSessions) > 0 {
 			// Пока что добавляем в первую сессию
-			allSessions[0].EnqueueDownstream(packet[:n])
+			// Копируем данные, т.к. buffer packet переиспользуется в цикле
+			packetCopy := make([]byte, n)
+			copy(packetCopy, packet[:n])
+			allSessions[0].EnqueueDownstream(packetCopy)
 			log.Printf("Packet queued for downstream delivery")
 		}
 	}
