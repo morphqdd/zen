@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"zen/internal/config"
@@ -114,6 +115,19 @@ func main() {
 	utils.RunIP("link", "set", "dev", iface.Name(), "mtu", MTU)
 	utils.RunIP("addr", "add", LOCAL_IP, "dev", iface.Name())
 	utils.RunIP("link", "set", "dev", iface.Name(), "up")
+
+	// ВАЖНО: Добавляем route exceptions для DoH сервера ПЕРЕД настройкой VPN маршрутов
+	// Cloudflare DNS: 104.16.0.0/13 covers cloudflare-dns.com IPs
+	// Google DNS: 8.8.8.0/24, 8.8.4.0/24
+	log.Printf("Adding route exceptions for DoH servers...")
+	addRouteException("104.16.0.0/13")  // Cloudflare
+	addRouteException("1.1.1.0/24")     // Cloudflare DNS
+	addRouteException("1.0.0.0/24")     // Cloudflare DNS
+	addRouteException("8.8.8.0/24")     // Google DNS
+	addRouteException("8.8.4.0/24")     // Google DNS
+	addRouteException("77.88.8.0/24")   // Yandex DNS
+
+	// Теперь настраиваем VPN маршруты (они перехватывают весь остальной трафик)
 	utils.RunIP("route", "add", "0.0.0.0/1", "dev", iface.Name())
 	utils.RunIP("route", "add", "128.0.0.0/1", "dev", iface.Name())
 
@@ -271,4 +285,38 @@ func generateSessionID() string {
 	b := make([]byte, 6)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// addRouteException добавляет исключение в маршрутизации для DoH сервера
+// чтобы DoH трафик не уходил через VPN туннель
+func addRouteException(network string) {
+	// Получаем default gateway и interface
+	gateway, iface := getDefaultRoute()
+	if gateway == "" || iface == "" {
+		log.Printf("Warning: Could not detect default route, skipping exception for %s", network)
+		return
+	}
+
+	// Добавляем route exception
+	utils.RunIP("route", "add", network, "via", gateway, "dev", iface)
+	log.Printf("Added route exception: %s via %s dev %s", network, gateway, iface)
+}
+
+// getDefaultRoute возвращает default gateway и interface
+func getDefaultRoute() (gateway, iface string) {
+	// Используем ip route show default
+	output := utils.RunCommandOutput("ip", "route", "show", "default")
+
+	// Парсим вывод: "default via 192.168.1.1 dev wlp1s0 ..."
+	parts := strings.Fields(output)
+	for i, part := range parts {
+		if part == "via" && i+1 < len(parts) {
+			gateway = parts[i+1]
+		}
+		if part == "dev" && i+1 < len(parts) {
+			iface = parts[i+1]
+		}
+	}
+
+	return gateway, iface
 }

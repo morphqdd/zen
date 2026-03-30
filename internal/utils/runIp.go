@@ -27,3 +27,14 @@ func RunCommand(name string, args ...string) {
 		log.Printf("Warning: command %s failed: %v", name, err)
 	}
 }
+
+// RunCommandOutput выполняет команду и возвращает её stdout
+func RunCommandOutput(name string, args ...string) string {
+	cmd := exec.Command(name, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		log.Printf("Warning: command %s failed: %v", name, err)
+		return ""
+	}
+	return string(output)
+}
