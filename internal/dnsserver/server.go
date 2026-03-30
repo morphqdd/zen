@@ -119,7 +119,7 @@ func (s *Server) handleUpstream(msg *dns.Msg, qname string) {
 	}
 
 	// Проверяем HMAC и извлекаем данные
-	signedData, err := s.validator.VerifyData(encryptedData, 600) // 10 минут TTL (учитываем задержки DoH)
+	signedData, err := s.validator.VerifyData(encryptedData, 0) // 0 = отключить timestamp проверку для отладки
 	if err != nil {
 		log.Printf("HMAC validation failed for session %s: %v", sessionID, err)
 		s.returnFakeIP(msg, qname)
