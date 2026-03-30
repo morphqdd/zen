@@ -156,12 +156,15 @@ func DecodeFromSubdomain(subdomain string) ([]byte, error) {
 
 // MaxChunkSize вычисляет максимальный размер данных для одного DNS запроса
 // Учитывает DNS label limit (63 chars) и overhead от semantic parts
+// ВАЖНО: Это размер полезной нагрузки БЕЗ заголовка чанка (2 байта)
 func MaxChunkSize() int {
 	// DNS label max: 63 символа
 	// Semantic parts: ~20 chars (например "cdn-images-thumb-")
 	// Дефисы: 3 chars
-	// Доступно для hex: ~40 chars = 20 bytes сырых данных
-	return 20
+	// Доступно для hex: ~40 chars = 20 bytes
+	// Клиент добавляет 2-byte header, поэтому возвращаем 18
+	// 18 (data) + 2 (header) = 20 bytes = 40 hex chars ✓
+	return 18
 }
 
 // ChunkData разбивает большие данные на chunks для отправки в нескольких DNS запросах
