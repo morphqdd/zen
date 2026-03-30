@@ -176,7 +176,7 @@ func main() {
 
 			// Отправляем через DoH
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			resp, err := dohClient.QueryA(ctx, queryName)
+			_, err = dohClient.QueryA(ctx, queryName)
 			cancel()
 
 			if err != nil {
